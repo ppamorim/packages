@@ -1,0 +1,3 @@
+changelog: |
+  - Adds `scrollableBuilder` to `showModalBottomSheet` and `ModalBottomSheetRoute`, whose `ScrollController` lets a scroll view in the sheet drag the sheet down from its top. `builder` is now optional when `scrollableBuilder` is given.
+version: minor

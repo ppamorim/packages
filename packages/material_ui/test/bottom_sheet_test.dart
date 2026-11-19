@@ -3623,6 +3623,291 @@ void main() {
     // animation continues from the current visual offset.
     expect(yAfterUp, closeTo(yBeforeUp, 0.1));
   });
+
+  group('scrollableBuilder', () {
+    const mobile = TargetPlatformVariant(<TargetPlatform>{
+      TargetPlatform.android,
+      TargetPlatform.iOS,
+    });
+    // The default sheet is 9/16 of the 600px test screen tall.
+    const double sheetHeight = 600.0 * 9.0 / 16.0;
+    const double openTop = 600.0 - sheetHeight;
+
+    Widget buildList({int itemCount = 30, bool reverse = false, ScrollController? controller}) {
+      return ListView.builder(
+        reverse: reverse,
+        controller: controller,
+        itemCount: itemCount,
+        itemBuilder: (BuildContext context, int index) =>
+            SizedBox(height: 50.0, child: Text('Item $index')),
+      );
+    }
+
+    Widget buildApp({
+      bool enableDrag = true,
+      WidgetBuilder? builder,
+      ScrollableWidgetBuilder? scrollableBuilder,
+    }) {
+      return MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (BuildContext context) => TextButton(
+              onPressed: () => showModalBottomSheet<void>(
+                context: context,
+                enableDrag: enableDrag,
+                builder: builder,
+                scrollableBuilder: builder != null
+                    ? null
+                    : scrollableBuilder ??
+                          (BuildContext context, ScrollController controller) =>
+                              buildList(controller: controller),
+              ),
+              child: const Text('Show'),
+            ),
+          ),
+        ),
+      );
+    }
+
+    Future<void> showSheet(WidgetTester tester, Widget app) async {
+      await tester.pumpWidget(app);
+      await tester.tap(find.text('Show'));
+      await tester.pumpAndSettle();
+    }
+
+    double sheetTop(WidgetTester tester) => tester.getTopLeft(find.byType(BottomSheet)).dy;
+    double listOffset(WidgetTester tester) =>
+        tester.state<ScrollableState>(find.byType(Scrollable)).position.pixels;
+
+    // Starts a drag on the list and moves it past the touch slop.
+    Future<TestGesture> startDrag(WidgetTester tester, {double dy = 20.0}) async {
+      final TestGesture gesture = await tester.startGesture(
+        tester.getCenter(find.byType(ListView)),
+      );
+      await gesture.moveBy(Offset(0.0, dy));
+      await tester.pump();
+      return gesture;
+    }
+
+    Future<void> moveBy(WidgetTester tester, TestGesture gesture, double dy) async {
+      await gesture.moveBy(Offset(0.0, dy));
+      await tester.pump();
+    }
+
+    test('ModalBottomSheetRoute requires exactly one of builder and scrollableBuilder', () {
+      expect(() => ModalBottomSheetRoute<void>(isScrollControlled: false), throwsAssertionError);
+      expect(
+        () => ModalBottomSheetRoute<void>(
+          isScrollControlled: false,
+          builder: (BuildContext context) => const SizedBox(),
+          scrollableBuilder: (BuildContext context, ScrollController controller) =>
+              const SizedBox(),
+        ),
+        throwsAssertionError,
+      );
+    });
+
+    testWidgets('with builder, a list does not drag the sheet', (WidgetTester tester) async {
+      await showSheet(tester, buildApp(builder: (BuildContext context) => buildList()));
+
+      final TestGesture gesture = await startDrag(tester);
+      await moveBy(tester, gesture, 100.0);
+      expect(sheetTop(tester), openTop);
+      expect(listOffset(tester), lessThanOrEqualTo(0.0));
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(sheetTop(tester), openTop);
+    }, variant: mobile);
+
+    testWidgets('when enableDrag is false, the list does not drag the sheet', (
+      WidgetTester tester,
+    ) async {
+      await showSheet(tester, buildApp(enableDrag: false));
+
+      final TestGesture gesture = await startDrag(tester);
+      await moveBy(tester, gesture, 100.0);
+      expect(sheetTop(tester), openTop);
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(sheetTop(tester), openTop);
+    }, variant: mobile);
+
+    testWidgets('when enableDrag is false, a short list keeps its physics', (
+      WidgetTester tester,
+    ) async {
+      await showSheet(
+        tester,
+        buildApp(
+          enableDrag: false,
+          scrollableBuilder: (BuildContext context, ScrollController controller) =>
+              buildList(itemCount: 2, controller: controller),
+        ),
+      );
+      final ScrollPosition position = tester
+          .state<ScrollableState>(find.byType(Scrollable))
+          .position;
+      expect(position.physics.shouldAcceptUserOffset(position), isFalse);
+    });
+
+    testWidgets('a list with its own controller does not drag the sheet', (
+      WidgetTester tester,
+    ) async {
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      await showSheet(
+        tester,
+        buildApp(
+          scrollableBuilder: (BuildContext context, ScrollController sheetController) =>
+              buildList(controller: controller),
+        ),
+      );
+
+      final TestGesture gesture = await startDrag(tester);
+      await moveBy(tester, gesture, 100.0);
+      expect(sheetTop(tester), openTop);
+      await gesture.up();
+      await tester.pumpAndSettle();
+    }, variant: mobile);
+
+    testWidgets('a downward drag on the list moves the sheet with the finger', (
+      WidgetTester tester,
+    ) async {
+      await showSheet(tester, buildApp());
+      final TestGesture gesture = await startDrag(tester);
+      final double top = sheetTop(tester);
+
+      await moveBy(tester, gesture, 30.0);
+      expect(sheetTop(tester), moreOrLessEquals(top + 30.0));
+      await moveBy(tester, gesture, 40.0);
+      expect(sheetTop(tester), moreOrLessEquals(top + 70.0));
+      expect(listOffset(tester), 0.0);
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    }, variant: TargetPlatformVariant.all());
+
+    testWidgets('a slow release above half springs back', (WidgetTester tester) async {
+      await showSheet(tester, buildApp());
+      final TestGesture gesture = await startDrag(tester);
+      await moveBy(tester, gesture, sheetHeight / 4);
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(sheetTop(tester), openTop);
+    }, variant: mobile);
+
+    testWidgets('a slow release below half closes the sheet', (WidgetTester tester) async {
+      await showSheet(tester, buildApp());
+      final TestGesture gesture = await startDrag(tester);
+      await moveBy(tester, gesture, sheetHeight * 0.6);
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+    }, variant: mobile);
+
+    testWidgets('a downward fling closes the sheet', (WidgetTester tester) async {
+      await showSheet(tester, buildApp());
+      await tester.fling(find.byType(ListView), const Offset(0.0, 80.0), 2000.0);
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+    }, variant: mobile);
+
+    testWidgets('reversing upward returns the sheet and then scrolls the list', (
+      WidgetTester tester,
+    ) async {
+      await showSheet(tester, buildApp());
+      final TestGesture gesture = await startDrag(tester);
+      await moveBy(tester, gesture, 80.0);
+      expect(sheetTop(tester), greaterThan(openTop));
+
+      await moveBy(tester, gesture, -150.0);
+      expect(sheetTop(tester), openTop);
+      await moveBy(tester, gesture, -50.0);
+      await moveBy(tester, gesture, -50.0);
+      expect(sheetTop(tester), openTop);
+      expect(listOffset(tester), greaterThan(0.0));
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(sheetTop(tester), openTop);
+    }, variant: mobile);
+
+    testWidgets('a drag that starts mid-list scrolls, then moves the sheet at the top', (
+      WidgetTester tester,
+    ) async {
+      await showSheet(tester, buildApp());
+      tester.state<ScrollableState>(find.byType(Scrollable)).position.jumpTo(100.0);
+      await tester.pump();
+
+      final TestGesture gesture = await startDrag(tester, dy: -20.0);
+      final double offset = listOffset(tester);
+      await moveBy(tester, gesture, 30.0);
+      expect(listOffset(tester), lessThan(offset));
+      expect(sheetTop(tester), openTop);
+
+      for (var i = 0; i < 20; i++) {
+        await moveBy(tester, gesture, 10.0);
+      }
+      expect(listOffset(tester), lessThanOrEqualTo(0.0));
+      expect(sheetTop(tester), greaterThan(openTop));
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    }, variant: mobile);
+
+    testWidgets('a list too short to scroll still drags the sheet', (WidgetTester tester) async {
+      await showSheet(
+        tester,
+        buildApp(
+          scrollableBuilder: (BuildContext context, ScrollController controller) =>
+              buildList(itemCount: 2, controller: controller),
+        ),
+      );
+      final TestGesture gesture = await startDrag(tester);
+      final double top = sheetTop(tester);
+      await moveBy(tester, gesture, 50.0);
+      expect(sheetTop(tester), moreOrLessEquals(top + 50.0));
+      await gesture.up();
+      await tester.pumpAndSettle();
+    }, variant: mobile);
+
+    testWidgets('a reversed list does not drag the sheet', (WidgetTester tester) async {
+      await showSheet(
+        tester,
+        buildApp(
+          scrollableBuilder: (BuildContext context, ScrollController controller) =>
+              buildList(reverse: true, controller: controller),
+        ),
+      );
+      TestGesture gesture = await startDrag(tester);
+      await moveBy(tester, gesture, 100.0);
+      expect(sheetTop(tester), openTop);
+      expect(listOffset(tester), greaterThan(0.0));
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      tester.state<ScrollableState>(find.byType(Scrollable)).position.jumpTo(0.0);
+      gesture = await startDrag(tester, dy: -20.0);
+      await moveBy(tester, gesture, -100.0);
+      expect(sheetTop(tester), openTop);
+      await gesture.up();
+      await tester.pumpAndSettle();
+    }, variant: mobile);
+
+    testWidgets('a drag during the entry animation does not leave the sheet stuck', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(buildApp());
+      await tester.tap(find.text('Show'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      final TestGesture gesture = await startDrag(tester);
+      await moveBy(tester, gesture, 10.0);
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(sheetTop(tester), openTop);
+    }, variant: mobile);
+  });
 }
 
 class _TestPage extends StatelessWidget {

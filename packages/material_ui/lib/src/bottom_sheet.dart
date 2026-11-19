@@ -433,6 +433,135 @@ class _BottomSheetState extends State<BottomSheet> {
   }
 }
 
+// The contents built by [ModalBottomSheetRoute.scrollableBuilder], given a
+// scroll controller that drags the enclosing [BottomSheet].
+class _ScrollableSheetContent extends StatefulWidget {
+  const _ScrollableSheetContent({required this.builder});
+
+  final ScrollableWidgetBuilder builder;
+
+  @override
+  State<_ScrollableSheetContent> createState() => _ScrollableSheetContentState();
+}
+
+class _ScrollableSheetContentState extends State<_ScrollableSheetContent> {
+  late final _BottomSheetScrollController _controller = _BottomSheetScrollController(
+    draggableSheet: _findDraggableSheet,
+  );
+
+  // Looked up on use, so the controller follows the sheet's current settings.
+  _BottomSheetState? _findDraggableSheet() {
+    final _BottomSheetState? sheet = mounted
+        ? context.findAncestorStateOfType<_BottomSheetState>()
+        : null;
+    if (sheet == null || !sheet.widget.enableDrag || sheet.widget.animationController == null) {
+      return null;
+    }
+    return sheet;
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context, _controller);
+}
+
+class _BottomSheetScrollController extends ScrollController {
+  _BottomSheetScrollController({required this.draggableSheet});
+
+  // Returns null while the sheet cannot be dragged.
+  final ValueGetter<_BottomSheetState?> draggableSheet;
+
+  @override
+  ScrollPosition createScrollPosition(
+    ScrollPhysics physics,
+    ScrollContext context,
+    ScrollPosition? oldPosition,
+  ) {
+    return _BottomSheetScrollPosition(
+      // A list too short to scroll must still receive drags to move the sheet.
+      physics: draggableSheet() == null
+          ? physics
+          : physics.applyTo(const AlwaysScrollableScrollPhysics()),
+      context: context,
+      oldPosition: oldPosition,
+      controller: this,
+    );
+  }
+}
+
+// Sends the user's drag to the sheet instead of the list while the list is at
+// its top and the drag is downward, or while the sheet is already dragged down.
+//
+// This is a modified copy of _CupertinoSheetScrollPosition from cupertino_ui,
+// which is itself a modified copy of the position that DraggableScrollableSheet
+// uses. If a change needs to be made to this, check whether those need it too.
+class _BottomSheetScrollPosition extends ScrollPositionWithSingleContext {
+  _BottomSheetScrollPosition({
+    required super.physics,
+    required super.context,
+    super.oldPosition,
+    required this.controller,
+  });
+
+  final _BottomSheetScrollController controller;
+
+  // Whether the sheet has received a delta during the current drag.
+  bool _sheetDragged = false;
+
+  bool get _listShouldScroll => pixels > 0.0;
+
+  @override
+  void applyUserOffset(double delta) {
+    final _BottomSheetState? sheet = controller.draggableSheet();
+    // A reversed or horizontal list never hands its drag to the sheet.
+    final bool toSheet =
+        sheet != null &&
+        axisDirection == AxisDirection.down &&
+        !_listShouldScroll &&
+        (delta > 0.0 || (_sheetDragged && sheet.widget.animationController!.value < 1.0));
+    if (!toSheet) {
+      super.applyUserOffset(delta);
+      return;
+    }
+    if (!_sheetDragged) {
+      _sheetDragged = true;
+      sheet._handleDragStart(DragStartDetails());
+    }
+    sheet._handleDragUpdate(
+      DragUpdateDetails(
+        globalPosition: Offset.zero,
+        delta: Offset(0.0, delta),
+        primaryDelta: delta,
+      ),
+    );
+  }
+
+  @override
+  void goBallistic(double velocity) {
+    if (!_sheetDragged) {
+      super.goBallistic(velocity);
+      return;
+    }
+    _sheetDragged = false;
+    // ScrollDragController.end negates the finger velocity, so a downward
+    // release arrives here as a negative velocity.
+    final bool flungDown = velocity < 0.0 && !_listShouldScroll;
+    final double sheetVelocity = flungDown ? -velocity : 0.0;
+    controller.draggableSheet()?._handleDragEnd(
+      DragEndDetails(
+        velocity: Velocity(pixelsPerSecond: Offset(0.0, sheetVelocity)),
+        primaryVelocity: sheetVelocity,
+      ),
+    );
+    super.goBallistic(flungDown ? 0.0 : velocity);
+  }
+}
+
 // PERSISTENT BOTTOM SHEETS
 
 // See scaffold.dart
@@ -844,6 +973,10 @@ class _ModalBottomSheetState<T> extends State<_ModalBottomSheet<T>> {
 /// The [enableDrag] parameter specifies whether the bottom sheet can be
 /// dragged up and down and dismissed by swiping downwards.
 ///
+/// The contents of the sheet come from either [builder] or [scrollableBuilder].
+/// Use [scrollableBuilder] when the sheet has a scroll view, so that the scroll
+/// view can drag the sheet down once it is scrolled to its top.
+///
 /// The [useSafeArea] parameter specifies whether the sheet will avoid system
 /// intrusions on the top, left, and right. If false, no [SafeArea] is added;
 /// and [MediaQuery.removePadding] is applied to the top,
@@ -868,6 +1001,19 @@ class _ModalBottomSheetState<T> extends State<_ModalBottomSheet<T>> {
 ///
 /// {@macro flutter.widgets.RawDialogRoute}
 ///
+/// <callout-box>
+///
+/// This sample shows a list in a modal bottom sheet that drags the sheet down
+/// when it is pulled down from its top, using `scrollableBuilder`.
+///
+// TODO(framework): Replace the following block with a @dartpad directive
+// when it's supported. https://github.com/dart-lang/dartdoc/issues/4123
+/// {@macro material_ui.dartpad_guide}
+///
+/// {@example /example/lib/bottom_sheet/show_modal_bottom_sheet.3.dart#body}
+///
+/// </callout-box>
+///
 /// See also:
 ///
 ///  * [showModalBottomSheet], which is a way to display a ModalBottomSheetRoute.
@@ -883,8 +1029,11 @@ class _ModalBottomSheetState<T> extends State<_ModalBottomSheet<T>> {
 ///  * The Material 3 spec at <https://m3.material.io/components/bottom-sheets/overview>.
 class ModalBottomSheetRoute<T> extends PopupRoute<T> {
   /// A modal bottom sheet route.
+  ///
+  /// Exactly one of `builder` and [scrollableBuilder] must be provided.
   ModalBottomSheetRoute({
-    required this.builder,
+    WidgetBuilder? builder,
+    this.scrollableBuilder,
     this.capturedThemes,
     this.barrierLabel,
     this.barrierOnTapHint,
@@ -905,13 +1054,42 @@ class ModalBottomSheetRoute<T> extends PopupRoute<T> {
     this.anchorPoint,
     this.useSafeArea = false,
     this.sheetAnimationStyle,
-  });
+  }) : assert(
+         (builder == null) != (scrollableBuilder == null),
+         'Exactly one of builder and scrollableBuilder must be provided.',
+       ),
+       builder =
+           builder ??
+           ((BuildContext context) => _ScrollableSheetContent(builder: scrollableBuilder!));
 
   /// A builder for the contents of the sheet.
   ///
   /// The bottom sheet will wrap the widget produced by this builder in a
   /// [Material] widget.
+  ///
+  /// If the route was created with a [scrollableBuilder], this builds the
+  /// contents that [scrollableBuilder] returns.
   final WidgetBuilder builder;
+
+  /// {@template material_ui.ModalBottomSheetRoute.scrollableBuilder}
+  /// A builder for the contents of the sheet that also receives a
+  /// [ScrollController], for use instead of `builder`.
+  ///
+  /// Give the [ScrollController] to the vertical scroll view in the sheet.
+  /// Once that scroll view is scrolled to its top, dragging it down drags the
+  /// sheet down instead, and releasing it closes the sheet or returns it to
+  /// fully open by the same rules as dragging the sheet itself. Dragging back
+  /// up returns the sheet to fully open, and then scrolls the list, in the
+  /// same gesture. A scroll view that uses a [ScrollController] of its own
+  /// scrolls as usual but never drags the sheet.
+  ///
+  /// This only takes effect while [enableDrag] is true. Otherwise the provided
+  /// [ScrollController] behaves like a plain one.
+  ///
+  /// A [RefreshIndicator] around the scroll view never starts a refresh: a
+  /// pull at the top drags the sheet instead.
+  /// {@endtemplate}
+  final ScrollableWidgetBuilder? scrollableBuilder;
 
   /// Stores a list of captured [InheritedTheme]s that are wrapped around the
   /// bottom sheet.
@@ -1227,6 +1405,9 @@ class ModalBottomSheetRoute<T> extends PopupRoute<T> {
 ///
 /// {@macro material_ui.ModalBottomSheetRoute}
 ///
+/// Exactly one of `builder` and `scrollableBuilder` must be provided.
+/// {@macro material_ui.ModalBottomSheetRoute.scrollableBuilder}
+///
 /// {@macro flutter.widgets.RawDialogRoute}
 ///
 /// The `context` argument is used to look up the [Navigator] and [Theme] for
@@ -1304,6 +1485,19 @@ class ModalBottomSheetRoute<T> extends PopupRoute<T> {
 ///
 /// </callout-box>
 ///
+/// <callout-box>
+///
+/// This sample shows a list in a modal bottom sheet that drags the sheet down
+/// when it is pulled down from its top, using `scrollableBuilder`.
+///
+// TODO(framework): Replace the following block with a @dartpad directive
+// when it's supported. https://github.com/dart-lang/dartdoc/issues/4123
+/// {@macro material_ui.dartpad_guide}
+///
+/// {@example /example/lib/bottom_sheet/show_modal_bottom_sheet.3.dart#body}
+///
+/// </callout-box>
+///
 /// See also:
 ///
 ///  * [BottomSheet], which becomes the parent of the widget returned by the
@@ -1321,7 +1515,8 @@ class ModalBottomSheetRoute<T> extends PopupRoute<T> {
 @awaitNotRequired
 Future<T?> showModalBottomSheet<T>({
   required BuildContext context,
-  required WidgetBuilder builder,
+  WidgetBuilder? builder,
+  ScrollableWidgetBuilder? scrollableBuilder,
   Color? backgroundColor,
   String? barrierLabel,
   double? elevation,
@@ -1350,6 +1545,7 @@ Future<T?> showModalBottomSheet<T>({
   return navigator.push(
     ModalBottomSheetRoute<T>(
       builder: builder,
+      scrollableBuilder: scrollableBuilder,
       capturedThemes: InheritedTheme.capture(from: context, to: navigator.context),
       isScrollControlled: isScrollControlled,
       scrollControlDisabledMaxHeightRatio: scrollControlDisabledMaxHeightRatio,
